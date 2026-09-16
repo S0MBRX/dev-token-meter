@@ -68,8 +68,8 @@ namespace DevTokenMeter
         public const int Cell = 13, Gap = 3, Step = Cell + Gap;
         const int Gutter = 28, MonthBar = 24;
 
+        public DateTime Start = DateTime.Today.AddDays(-364);
         public DateTime End = DateTime.Today;
-        public int RangeDays = 365;
         public Color[] Ramp = Theme.Ramp("claude");
         public Func<string, long> GetValue = k => 0;
         public Func<string, int> GetLevel;            // when set, used instead of relative scaling
@@ -107,23 +107,17 @@ namespace DevTokenMeter
 
         string _pendingText;
 
-        public int Weeks
-        {
-            get
-            {
-                var start = End.AddDays(-(RangeDays - 1));
-                int lead = ((int)start.DayOfWeek + 6) % 7;
-                return (int)Math.Ceiling((lead + RangeDays) / 7.0);
-            }
-        }
+        public int RangeDays { get { return (int)(End - Start).TotalDays + 1; } }
+        int Lead { get { return ((int)Start.DayOfWeek + 6) % 7; } }
+
+        public int Weeks { get { return (int)Math.Ceiling((Lead + RangeDays) / 7.0); } }
 
         public Size Preferred { get { return new Size(Gutter + Weeks * Step + 8, MonthBar + 7 * Step + 4); } }
 
         long MaxValue()
         {
             long max = 0;
-            var start = End.AddDays(-(RangeDays - 1));
-            for (var d = start; d <= End; d = d.AddDays(1))
+            for (var d = Start; d <= End; d = d.AddDays(1))
             {
                 long v = GetValue(Key(d));
                 if (v > max) max = v;
@@ -148,8 +142,8 @@ namespace DevTokenMeter
             g.Clear(BackColor);
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
-            var start = End.AddDays(-(RangeDays - 1));
-            int lead = ((int)start.DayOfWeek + 6) % 7;
+            var start = Start;
+            int lead = Lead;
             long max = GetLevel != null ? 0 : MaxValue();
 
             using (var dim = new SolidBrush(Theme.Faint))
@@ -205,11 +199,10 @@ namespace DevTokenMeter
             if (col < 0 || row < 0 || row > 6) return null;
             if ((p.X - Gutter) % Step > Cell || (p.Y - MonthBar) % Step > Cell) return null;
 
-            var start = End.AddDays(-(RangeDays - 1));
-            int lead = ((int)start.DayOfWeek + 6) % 7;
+            int lead = Lead;
             int i = col * 7 + row;
             if (i < lead || i >= lead + RangeDays) return null;
-            return Key(start.AddDays(i - lead));
+            return Key(Start.AddDays(i - lead));
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
@@ -438,12 +431,17 @@ namespace DevTokenMeter
         readonly Section _cx = new Section("Codex", Theme.Codex, "codex");
         readonly Panel _host = new Panel();
         readonly Label _status = new Label();
-        readonly FlowLayoutPanel _bar = new FlowLayoutPanel();
+        readonly Panel _bar = new Panel();
+        readonly List<Control> _left = new List<Control>();
+        readonly List<Button> _years = new List<Button>();
+        Button _metricBtn;
 
         Agg _claude, _codex;
         GitHubData _github;
         string _metric = "total";
+        string _mode = "days";          // "days" = trailing window, "year" = calendar year
         int _range = 365;
+        int _year = DateTime.Today.Year;
         string _ghUser;
         volatile bool _busy;
 
@@ -464,23 +462,29 @@ namespace DevTokenMeter
             ClientSize = new Size(1000, 780);
 
             _bar.Dock = DockStyle.Top;
+            _bar.Height = 62;
             _bar.BackColor = Theme.Bg;
-            _bar.Padding = new Padding(10, 10, 10, 6);
-            _bar.WrapContents = true;               // 2x text no longer fits on one row
-            _bar.AutoSize = true;
-            _bar.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            _bar.AutoScroll = false;
 
-            foreach (var r in Ranges) _bar.Controls.Add(MakeToggle(r + "d", () => _range == r, () => { _range = r; Refresh2(false); }));
-            _bar.Controls.Add(Spacer(14));
-            foreach (var m in Metrics)
+            // left: the day counts, kept as visible buttons
+            foreach (var r in Ranges)
             {
-                var mm = m;
-                _bar.Controls.Add(MakeToggle(mm[1], () => _metric == mm[0], () => { _metric = mm[0]; Refresh2(false); }));
+                var rr = r;
+                var b = MakeToggle(rr + "d", () => _mode == "days" && _range == rr,
+                                   () => { _mode = "days"; _range = rr; Refresh2(false); });
+                _bar.Controls.Add(b);
+                _left.Add(b);
             }
-            _bar.Controls.Add(Spacer(14));
-            _bar.Controls.Add(MakeButton("Rescan", () => Load2(true)));
-            _bar.Controls.Add(MakeButton("GitHub…", PromptUser));
+
+            // everything else folded away into two menus
+            _metricBtn = MakeButton("Total ▾", () => ShowMetricMenu());
+            _bar.Controls.Add(_metricBtn);
+            _left.Add(_metricBtn);
+
+            var more = MakeButton("⋯", () => ShowMoreMenu());
+            _bar.Controls.Add(more);
+            _left.Add(more);
+
+            _bar.Resize += (s, e) => LayoutBar();
 
             _status.Dock = DockStyle.Bottom;
             _status.Height = 42;
@@ -505,9 +509,97 @@ namespace DevTokenMeter
             Shown += (s, e) => Load2(false);
         }
 
-        static Control Spacer(int w)
+        // day counts on the left, year buttons right-aligned like GitHub's calendar
+        void LayoutBar()
         {
-            return new Panel { Width = w, Height = 46, BackColor = Color.Transparent };
+            int x = 10;
+            foreach (var c in _left)
+            {
+                c.Location = new Point(x, 8);
+                x += c.Width + 7;
+                if (c == _left[Ranges.Length - 1]) x += 12;   // gap after the day counts
+            }
+            int right = _bar.ClientSize.Width - 10;
+            for (int i = _years.Count - 1; i >= 0; i--)
+            {
+                right -= _years[i].Width;
+                _years[i].Location = new Point(right, 8);
+                right -= 7;
+            }
+        }
+
+        void BuildYearButtons()
+        {
+            foreach (var b in _years) { _bar.Controls.Remove(b); b.Dispose(); }
+            _years.Clear();
+            _toggles.RemoveAll(t => t.Item1.IsDisposed);
+
+            int first = DateTime.Today.Year;
+            Action<IEnumerable<string>> note = keys =>
+            {
+                foreach (var k in keys)
+                {
+                    int y;
+                    if (k.Length >= 4 && int.TryParse(k.Substring(0, 4), out y) && y < first) first = y;
+                }
+            };
+            if (_claude != null) note(_claude.Days.Keys);
+            if (_codex != null) note(_codex.Days.Keys);
+            if (_github != null && _github.Available) note(_github.Days.Keys);
+
+            for (int y = DateTime.Today.Year; y >= first; y--)
+            {
+                var yy = y;
+                var b = MakeToggle(yy.ToString(CultureInfo.InvariantCulture),
+                                   () => _mode == "year" && _year == yy,
+                                   () => { _mode = "year"; _year = yy; Refresh2(false); });
+                _bar.Controls.Add(b);
+                _years.Add(b);
+            }
+            _years.Reverse();   // oldest first, so the newest ends up rightmost
+            LayoutBar();
+        }
+
+        void ShowMetricMenu()
+        {
+            var menu = DarkMenu();
+            foreach (var m in Metrics)
+            {
+                var mm = m;
+                var it = new ToolStripMenuItem(mm[1]);
+                it.Checked = _metric == mm[0];
+                it.Click += (s, e) => { _metric = mm[0]; _metricBtn.Text = mm[1] + " ▾"; Refresh2(false); };
+                menu.Items.Add(it);
+            }
+            menu.Show(_metricBtn, new Point(0, _metricBtn.Height));
+        }
+
+        void ShowMoreMenu()
+        {
+            var menu = DarkMenu();
+            var rescan = new ToolStripMenuItem("Rescan");
+            rescan.Click += (s, e) => Load2(true);
+            var gh = new ToolStripMenuItem("GitHub username…");
+            gh.Click += (s, e) => PromptUser();
+            var refresh = new ToolStripMenuItem("Refresh GitHub now");
+            refresh.Click += (s, e) => Load2(true);
+            menu.Items.Add(rescan);
+            menu.Items.Add(refresh);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(gh);
+            var src = _left[_left.Count - 1];
+            menu.Show(src, new Point(0, src.Height));
+        }
+
+        static ContextMenuStrip DarkMenu()
+        {
+            var m = new ContextMenuStrip();
+            m.BackColor = Theme.Panel2;
+            m.ForeColor = Theme.Fg;
+            m.Font = Theme.UI;
+            m.ShowImageMargin = false;
+            m.RenderMode = ToolStripRenderMode.System;
+            return m;
         }
 
         readonly List<Tuple<Button, Func<bool>>> _toggles = new List<Tuple<Button, Func<bool>>>();
@@ -643,9 +735,11 @@ namespace DevTokenMeter
                 FillTokenDetails(_cl, _claude);
                 FillTokenDetails(_cx, _codex);
                 FillGhDetails();
+                BuildYearButtons();
             }
 
             SyncToggles();
+            LayoutBar();
             Restack();
             _cl.Map.Invalidate(); _cx.Map.Invalidate(); _gh.Map.Invalidate();
             _cl.Details.Invalidate(); _cx.Details.Invalidate(); _gh.Details.Invalidate();
@@ -657,10 +751,25 @@ namespace DevTokenMeter
                 "  ·  " + DateTime.Now.ToString("HH:mm:ss");
         }
 
+        void WindowFor(out DateTime start, out DateTime end)
+        {
+            if (_mode == "year")
+            {
+                start = new DateTime(_year, 1, 1);
+                end = _year == DateTime.Today.Year ? DateTime.Today : new DateTime(_year, 12, 31);
+            }
+            else
+            {
+                end = DateTime.Today;
+                start = end.AddDays(-(_range - 1));
+            }
+        }
+
         void WireTokens(Section sec, Agg a)
         {
-            sec.Map.RangeDays = _range;
-            sec.Map.End = DateTime.Today;
+            DateTime s, e;
+            WindowFor(out s, out e);
+            sec.Map.Start = s; sec.Map.End = e;
             sec.Map.GetLevel = null;
             sec.Map.GetValue = k => { Day d; return a.Days.TryGetValue(k, out d) ? DayVal(d) : 0; };
             sec.Map.GetTooltip = k => { Day d; a.Days.TryGetValue(k, out d); return DayTip(k, d); };
@@ -670,8 +779,9 @@ namespace DevTokenMeter
 
         void WireGitHub()
         {
-            _gh.Map.RangeDays = _range;
-            _gh.Map.End = DateTime.Today;
+            DateTime s, e;
+            WindowFor(out s, out e);
+            _gh.Map.Start = s; _gh.Map.End = e;
             if (_github == null || !_github.Available)
             {
                 _gh.Map.GetValue = k => 0;

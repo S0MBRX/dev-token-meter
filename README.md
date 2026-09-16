@@ -26,9 +26,12 @@ Three grids, top to bottom:
 Each grid has a collapsed **details** panel with stat tiles, a by-model and
 by-project breakdown, and your heaviest sessions.
 
-The toolbar switches the window (30d / 90d / 180d / 365d) and the metric the
-token grids are coloured by (total, output, input, cache write, cache read,
-replies). GitHub always shows contributions.
+The toolbar keeps the day counts (30d / 90d / 180d / 365d) as buttons and folds
+everything else away: a **Total ▾** menu picks the metric the token grids are
+coloured by (total, output, input, cache write, cache read, replies), and **⋯**
+holds rescan and the GitHub username. Calendar years sit right-aligned, the way
+GitHub lays them out — click one to see Jan–Dec for that year instead of a
+trailing window. GitHub always shows contributions regardless of the metric.
 
 ## Requirements
 
