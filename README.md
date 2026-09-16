@@ -54,9 +54,16 @@ Click **GitHub…** in the toolbar and enter your username, or:
 DevTokenMeter.exe --github YOUR_USERNAME
 ```
 
-It's stored in `%LOCALAPPDATA%\DevTokenMeter\config.json`. The contribution
-calendar is public data, so no token or login is involved. Responses are cached
-for 3 hours.
+It's stored in `%LOCALAPPDATA%\DevTokenMeter\config.json`. The public
+contribution calendar needs no token or login. Responses are cached for 3 hours.
+
+**Private repos.** GitHub leaves private-repo activity out of the public
+calendar, which is why your own profile can say 145 while the public page says
+51. If the [GitHub CLI](https://cli.github.com) is installed and logged in
+(`gh auth login`), the app also counts your commits on the default branch of
+each private repo you own and folds them into the grid — the same figure
+github.com shows you when you're signed in. The app never reads the token
+itself; it only runs `gh api`. Without `gh` you get the public numbers.
 
 ## Notes on the numbers
 

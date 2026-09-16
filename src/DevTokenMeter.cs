@@ -2,6 +2,7 @@
 // Target: .NET Framework 4.x (C# 5), compiled with the in-box csc.exe.
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -110,6 +111,7 @@ namespace DevTokenMeter
         public string User, Error;
         public Dictionary<string, GhDay> Days = new Dictionary<string, GhDay>();
         public int Total;
+        public int PrivateTotal;      // commits in the user's private repos, counted via gh
         public DateTime Fetched;
     }
 
@@ -376,6 +378,8 @@ namespace DevTokenMeter
                             d.Level = int.Parse(m.Groups[3].Value);
                             g.Days[d.D] = d; g.Total += d.Count;
                         }
+                        var mp = Regex.Match(txt, "\"private\":(\\d+)");
+                        if (mp.Success) g.PrivateTotal = int.Parse(mp.Groups[1].Value);
                         if (g.Days.Count > 0) { g.Available = true; g.Fetched = File.GetLastWriteTime(cacheFile); return g; }
                     }
                 }
@@ -435,6 +439,11 @@ namespace DevTokenMeter
                 return g;
             }
 
+            // The public calendar omits private repos entirely. If the GitHub CLI is
+            // installed and logged in, count the user's own commits in their private
+            // repos and fold them in, which is what github.com shows the owner.
+            AddPrivateCommits(g, user);
+
             foreach (var d in g.Days.Values) g.Total += d.Count;
             g.Available = true;
             g.Fetched = DateTime.Now;
@@ -442,7 +451,7 @@ namespace DevTokenMeter
             try
             {
                 var sb = new StringBuilder();
-                sb.Append("{\"user\":\"").Append(user).Append("\",\"days\":{");
+                sb.Append("{\"user\":\"").Append(user).Append("\",\"private\":").Append(g.PrivateTotal).Append(",\"days\":{");
                 bool first = true;
                 foreach (var d in g.Days.Values.OrderBy(x => x.D))
                 {
@@ -457,6 +466,148 @@ namespace DevTokenMeter
             catch { }
 
             return g;
+        }
+
+        // -------- private-repo commits via the GitHub CLI (never touches the token itself)
+
+        static readonly Regex RxRepo = new Regex(
+            "\"full_name\":\\s*\"([^\"]+)\",\\s*\"private\":\\s*(true|false)", RegexOptions.Compiled);
+        // per commit object: the first "date" is commit.author.date; the linked account is
+        // the top-level "author": {"login": ...} (null when GitHub can't attribute it)
+        // only a top-level commit has sha + node_id together; tree and parents carry sha alone
+        static readonly Regex RxShaSplit = new Regex("\\{\\s*\"sha\":\\s*\"[0-9a-f]{40}\",\\s*\"node_id\":", RegexOptions.Compiled);
+        static readonly Regex RxFirstDate = new Regex("\"date\":\\s*\"([^\"]+)\"", RegexOptions.Compiled);
+        static readonly Regex RxAuthorLogin = new Regex("\"author\":\\s*\\{\\s*\"login\":\\s*\"([^\"]+)\"", RegexOptions.Compiled);
+
+        static string FindGh()
+        {
+            var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+            foreach (var dir in path.Split(';'))
+            {
+                try
+                {
+                    var p = Path.Combine(dir.Trim(), "gh.exe");
+                    if (dir.Trim().Length > 0 && File.Exists(p)) return p;
+                }
+                catch { }
+            }
+            var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var link = Path.Combine(local, "Microsoft\\WinGet\\Links\\gh.exe");
+            if (File.Exists(link)) return link;
+            // winget user-scope install lands here and only adds itself to PATH for new shells
+            try
+            {
+                var pkgs = Path.Combine(local, "Microsoft\\WinGet\\Packages");
+                if (Directory.Exists(pkgs))
+                    foreach (var dir in Directory.GetDirectories(pkgs, "GitHub.cli*"))
+                    {
+                        var p = Path.Combine(dir, "bin\\gh.exe");
+                        if (File.Exists(p)) return p;
+                    }
+            }
+            catch { }
+            var pf = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "GitHub CLI\\gh.exe");
+            if (File.Exists(pf)) return pf;
+            return null;
+        }
+
+        static string RunGh(string gh, string args, int timeoutMs)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(gh, args);
+                psi.UseShellExecute = false;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                psi.CreateNoWindow = true;
+                using (var p = Process.Start(psi))
+                {
+                    var err = p.StandardError.ReadToEndAsync();
+                    var outp = p.StandardOutput.ReadToEnd();
+                    if (!p.WaitForExit(timeoutMs)) { try { p.Kill(); } catch { } Dbg("gh timed out: " + args); return null; }
+                    if (p.ExitCode != 0)
+                    {
+                        string e = ""; try { e = err.Result; } catch { }
+                        Dbg("gh exit " + p.ExitCode + " for " + args + " :: " + e.Trim());
+                        return null;
+                    }
+                    return outp;
+                }
+            }
+            catch (Exception ex) { Dbg("gh launch failed: " + ex.Message); return null; }
+        }
+
+        // only failures are logged, so a healthy install never writes this file
+        static void Dbg(string s)
+        {
+            try
+            {
+                File.AppendAllText(Path.Combine(Config.Dir, "gh-debug.log"),
+                    DateTime.Now.ToString("HH:mm:ss") + "  " + s + "\r\n");
+            }
+            catch { }
+        }
+
+        static void AddPrivateCommits(GitHubData g, string user)
+        {
+            var gh = FindGh();
+            if (gh == null) return;   // no GitHub CLI: public calendar only
+
+            var privRepos = new List<string>();
+            for (int page = 1; page <= 5; page++)
+            {
+                var js = RunGh(gh, "api \"user/repos?affiliation=owner&per_page=100&page=" + page + "\"", 20000);
+                if (string.IsNullOrEmpty(js)) break;
+                var ms = RxRepo.Matches(js);
+                foreach (Match m in ms)
+                    if (m.Groups[2].Value == "true") privRepos.Add(m.Groups[1].Value);
+                if (ms.Count < 100) break;
+            }
+            if (privRepos.Count == 0) return;
+
+            // window = whatever the public calendar covered
+            var earliest = g.Days.Keys.OrderBy(k => k).First();
+            var since = earliest + "T00:00:00Z";
+            int added = 0;
+
+            foreach (var repo in privRepos)
+            {
+                for (int page = 1; page <= 20; page++)
+                {
+                    // no author= filter: GitHub's REST filter misses noreply-authored commits,
+                    // so pull the default branch and keep the ones linked to this login
+                    var js = RunGh(gh, "api \"repos/" + repo + "/commits?since=" + since +
+                                       "&per_page=100&page=" + page + "\"", 30000);
+                    if (string.IsNullOrEmpty(js)) break;
+                    var chunks = RxShaSplit.Split(js);
+                    for (int i = 1; i < chunks.Length; i++)
+                    {
+                        var ml = RxAuthorLogin.Match(chunks[i]);
+                        if (!ml.Success || !ml.Groups[1].Value.Equals(user, StringComparison.OrdinalIgnoreCase)) continue;
+                        var md = RxFirstDate.Match(chunks[i]);
+                        DateTimeOffset dto;
+                        if (!md.Success || !DateTimeOffset.TryParse(md.Groups[1].Value, CultureInfo.InvariantCulture,
+                                DateTimeStyles.RoundtripKind | DateTimeStyles.AssumeUniversal, out dto)) continue;
+                        var key = dto.ToLocalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                        GhDay d;
+                        if (!g.Days.TryGetValue(key, out d)) { d = new GhDay(); d.D = key; g.Days[key] = d; }
+                        d.Count++; added++;
+                    }
+                    if (chunks.Length - 1 < 100) break;
+                }
+            }
+            g.PrivateTotal = added;
+            if (added == 0) return;
+
+            // re-derive colour levels from the merged counts, GitHub-quartile style
+            int max = 0;
+            foreach (var d in g.Days.Values) if (d.Count > max) max = d.Count;
+            foreach (var d in g.Days.Values)
+            {
+                if (d.Count <= 0) { d.Level = 0; continue; }
+                double r = (double)d.Count / max;
+                d.Level = r > .75 ? 4 : r > .5 ? 3 : r > .25 ? 2 : 1;
+            }
         }
     }
 

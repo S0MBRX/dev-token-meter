@@ -802,7 +802,8 @@ namespace DevTokenMeter
                 if (!_github.Days.TryGetValue(k, out d) || d.Count == 0) return head + "\nNo contributions";
                 return head + "\n" + Fmt.Grp(d.Count) + (d.Count == 1 ? " contribution" : " contributions");
             };
-            _gh.Amount = Fmt.Grp(_github.Total) + " contributions  ·  @" + _github.User;
+            _gh.Amount = Fmt.Grp(_github.Total) + " contributions  ·  @" + _github.User +
+                (_github.PrivateTotal > 0 ? "  ·  " + Fmt.Grp(_github.PrivateTotal) + " in private repos" : "");
         }
 
         void FillTokenDetails(Section sec, Agg a)
@@ -866,7 +867,8 @@ namespace DevTokenMeter
             }
             d.Tiles = new[]
             {
-                new[]{"Contributions", Fmt.Grp(_github.Total), "@" + _github.User},
+                new[]{"Contributions", Fmt.Grp(_github.Total),
+                      _github.PrivateTotal > 0 ? Fmt.Grp(_github.PrivateTotal) + " private via gh" : "@" + _github.User},
                 new[]{"Active days", active.ToString(), days.Count + " tracked"},
                 new[]{"Current streak", cur + "d", "consecutive"},
                 new[]{"Busiest day", best != null ? best.Count.ToString() : "-", best != null ? best.D : "-"}
