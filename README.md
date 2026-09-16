@@ -1,0 +1,80 @@
+# Dev Token Meter
+
+A single native Windows window showing how much you actually burn across
+**Claude Code**, **Codex** and **GitHub** — three contribution-style grids stacked
+one above the other, with per-day token counts on hover.
+
+![screenshot](docs/screenshot.png)
+
+## Why
+
+The usage widgets built into these tools are small, count messages rather than
+tokens, hide behind a hover delay, and are only reachable from a "new chat"
+screen. This reads the transcripts that are already on your disk and shows the
+real numbers, permanently, in one place.
+
+## What it shows
+
+Three grids, top to bottom:
+
+| Grid | Source | Hover shows |
+|---|---|---|
+| GitHub | `github.com/users/<you>/contributions` (public, no token) | contributions that day, GitHub's own colour levels |
+| Claude Code | `~/.claude/projects/**/*.jsonl` | total / output / input / cache write / cache read, replies, sessions |
+| Codex | `~/.codex/sessions/**/rollout-*.jsonl` | same breakdown |
+
+Each grid has a collapsed **details** panel with stat tiles, a by-model and
+by-project breakdown, and your heaviest sessions.
+
+The toolbar switches the window (30d / 90d / 180d / 365d) and the metric the
+token grids are coloured by (total, output, input, cache write, cache read,
+replies). GitHub always shows contributions.
+
+## Requirements
+
+Nothing to install. It targets .NET Framework 4.x, which ships with Windows,
+and it compiles with the `csc.exe` already in `C:\Windows\Microsoft.NET\`.
+
+## Build
+
+```
+build.bat
+```
+
+That produces `DevTokenMeter.exe` next to it. Run the exe; no arguments needed.
+
+## GitHub setup
+
+Click **GitHub…** in the toolbar and enter your username, or:
+
+```
+DevTokenMeter.exe --github YOUR_USERNAME
+```
+
+It's stored in `%LOCALAPPDATA%\DevTokenMeter\config.json`. The contribution
+calendar is public data, so no token or login is involved. Responses are cached
+for 3 hours.
+
+## Notes on the numbers
+
+**Cache reads dominate.** For long agent sessions they're routinely 95%+ of all
+tokens, so the "total" is much larger than what you'd think of as spending.
+Switch the metric to **Output** or look at the *Fresh (uncached)* tile for the
+figure closer to real consumption.
+
+**Codex counts input differently.** Its `input_tokens` already includes
+`cached_input_tokens`; Claude reports them as separate fields. The scanner
+normalises both to the same shape — fresh input, output, cache write, cache read.
+
+**Older Codex sessions use an older format.** Sessions recorded before
+`token_usage_record` existed only carry a cumulative `total_token_usage` on
+`event_msg`/`token_count` events. Those are reconstructed by diffing consecutive
+totals, and only for files that contain no exact records, so nothing is counted
+twice.
+
+Nothing is uploaded anywhere. The only network call is the public GitHub
+contributions page.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
